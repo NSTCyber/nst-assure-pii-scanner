@@ -22,43 +22,122 @@ pii_patterns = [
     # Add more PII patterns here
 ]
 
+# Create an empty list to store results/matches
+results = []
+counter = 0
+
 # Functions for scanning different sources
 def scan_text(text):
     for pattern in pii_patterns:
         matches = re.findall(pattern, text)
         if matches:
             return matches
-    return None
+        else:
+            return None
 
 def scan_files(path):
     for root, _, files in os.walk(path):
-        for file in files:
+        for file in enumerate(files):
             file_path = os.path.join(root, file)
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
                 matches = scan_text(content)
                 if matches:
                     print(f"PII found in {file_path}: {matches}")
+                    results.append({
+                        "Serial Number": counter+1,
+                        "PII Data": ", ".join(matches),
+                        "File Path": os.path.abspath(file)
+                        })
+                    counter += 1
+
 
 def scan_smb(host, username, password, domain):
     connection = SMBConnection(username, password, 'local_machine', host, domain=domain, use_ntlm_v2=True)
     connection.connect(host)
     shares = connection.listShares()
+
     for share in shares:
-        # Implement SMB file scanning logic
-        pass
+        # Only scan shares that are not system shares
+        if share.isSpecial:
+            continue
+
+        # Connect to the share
+        shared_device = SMBConnection(host, username, password, host, domain=domain, use_ntlm_v2=True)
+        shared_device.connect(host, share.name)
+
+        # scan files in the share recursively
+        for root, _, files in shared_device.listPath(share.name, "/"):
+            for file in files:
+                file_path = os.path.join(root, file.filename)
+                try:
+                    with shared_device.openFile(share.name, file_path, 'rb') as f:
+                        content = f.read().decode('utf-8', errors='ignore')
+                        matches = scan_text(content)
+                        if matches:
+                            print(f"PII found in {file_path}: {matches}")
+                            results.append({
+                                "Serial Number": counter+1,
+                                "PII Data": ", ".join(matches),
+                                "File Path": os.path.abspath(file)
+                            })
+                            counter += 1
+                except Exception as e:
+                    print(f"Error scanning {file_path}: {e}")
 
 def scan_ftp(host, username, password):
     ftp = ftplib.FTP(host)
     ftp.login(username, password)
-    # Implement FTP file scanning logic
-    pass
+    ftp.cwd('/')
+    files = ftp.nlst()
+    for file in files:
+        with ftp.open(file, 'r') as f:
+            content = f.read()
+            matches = scan_text(content)
+            if matches:
+                print(f"PII found in {file}: {matches}")
+                results.append({
+                    "Serial Number": counter+1,
+                    "PII Data": ", ".join(matches),
+                    "File Path": os.path.abspath(file)
+                })
+                counter += 1
+    ftp.quit()
 
 def scan_db(host, username, password, db_name):
     connection = pymysql.connect(host=host, user=username, password=password, db=db_name, cursorclass=pymysql.cursors.DictCursor)
     cursor = connection.cursor()
-    # Implement database scanning logic
-    pass
+
+    # Get list of tables in the database
+    cursor.execute("SHOW TABLES")
+    tables = [table['Tables_in_' + db_name] for table in cursor.fetchall()]
+
+    # Loop through each table
+    for table in tables:
+        # Get list of columns in the table
+        cursor.execute(f"DESCRIBE {table}")
+        columns = [column['Field'] for column in cursor.fetchall()]
+
+        # Loop through each column and scan for PII
+        for column in columns:
+            # Construct SELECT statement for the column
+            select_query = f"SELECT {column} FROM {table}"
+            cursor.execute(select_query)
+
+            # Loop through each row in the column and scan for PII
+            for row in cursor.fetchall():
+                if row[column] is not None:
+                    matches = scan_text(row[column])
+                    if matches:
+                        print(f"PII found in {db_name}.{table}.{column}: {matches}")
+                        results.append({
+                            "Serial Number": counter+1,
+                            "PII Data": ", ".join(matches),
+                            "File Path": os.path.abspath(file)
+                        })
+                        counter += 1
+
+    connection.close()
 
 # Main function
 def main():
@@ -87,6 +166,15 @@ def main():
         db_host = input("Enter the database host: ")
         db_name = input("Enter the database name: ")
         scan_db(db_host, username, password, db_name)
+
+        # Save results to CSV file
+        with open("results.csv", "w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=["Serial Number", "PII Data", "File Path"])
+            writer.writeheader()
+            for result in results:
+                writer.writerow(result)       
+
+        print(f"Found {len(results)} file(s) with PII data. Results saved to 'results.csv'.") 
 
     elif choice == 2:
         # Implement uncredentialed scanning logic
