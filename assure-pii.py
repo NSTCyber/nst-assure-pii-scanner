@@ -5,6 +5,12 @@ import ftplib
 import getpass
 from smb.SMBConnection import SMBConnection
 import pymysql
+import pyodbc
+import psycopg2
+import cx_Oracle
+from sqlalchemy import create_engine, inspect
+import csv
+import getpass
 
 # Define PII patterns
 pii_patterns = [
@@ -28,160 +34,381 @@ counter = 0
 
 # Functions for scanning different sources
 def scan_text(text):
-    for pattern in pii_patterns:
-        matches = re.findall(pattern, text)
-        if matches:
-            return matches
-        else:
-            return None
+    try:
+        for pattern in pii_patterns:
+            matches = re.findall(pattern, text)
+            if matches:
+                return matches
+        return None
+    except Exception as e:
+        print(f"An error occurred while scanning the text: {e}")
 
 def scan_files(path):
-    for root, _, files in os.walk(path):
-        for file in enumerate(files):
-            file_path = os.path.join(root, file)
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-                matches = scan_text(content)
-                if matches:
-                    print(f"PII found in {file_path}: {matches}")
-                    results.append({
-                        "Serial Number": counter+1,
-                        "PII Data": ", ".join(matches),
-                        "File Path": os.path.abspath(file)
-                        })
-                    counter += 1
-
-
-def scan_smb(host, username, password, domain):
-    connection = SMBConnection(username, password, 'local_machine', host, domain=domain, use_ntlm_v2=True)
-    connection.connect(host)
-    shares = connection.listShares()
-
-    for share in shares:
-        # Only scan shares that are not system shares
-        if share.isSpecial:
-            continue
-
-        # Connect to the share
-        shared_device = SMBConnection(host, username, password, host, domain=domain, use_ntlm_v2=True)
-        shared_device.connect(host, share.name)
-
-        # scan files in the share recursively
-        for root, _, files in shared_device.listPath(share.name, "/"):
+    try:
+        results = []
+        counter = 0
+        for root, _, files in os.walk(path):
             for file in files:
-                file_path = os.path.join(root, file.filename)
+                file_path = os.path.join(root, file)
                 try:
-                    with shared_device.openFile(share.name, file_path, 'rb') as f:
-                        content = f.read().decode('utf-8', errors='ignore')
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
                         matches = scan_text(content)
                         if matches:
                             print(f"PII found in {file_path}: {matches}")
                             results.append({
                                 "Serial Number": counter+1,
                                 "PII Data": ", ".join(matches),
-                                "File Path": os.path.abspath(file)
+                                "Location": os.path.abspath(file_path)
                             })
                             counter += 1
                 except Exception as e:
-                    print(f"Error scanning {file_path}: {e}")
+                    print(f"Error while processing file {file_path}: {e}")
+        return results
+    except Exception as e:
+        print(f"Error while scanning files: {e}")
+
+def scan_smb(host, username, password, domain):
+    try:
+        connection = SMBConnection(username, password, 'local_machine', host, domain=domain, use_ntlm_v2=True)
+        connection.connect(host)
+        shares = connection.listShares()
+
+        for share in shares:
+            # Only scan shares that are not system shares
+            if share.isSpecial:
+                continue
+
+            # Connect to the share
+            shared_device = SMBConnection(host, username, password, host, domain=domain, use_ntlm_v2=True)
+            shared_device.connect(host, share.name)
+
+            # scan files in the share recursively
+            for root, _, files in shared_device.listPath(share.name, "/"):
+                for file in files:
+                    file_path = os.path.join(root, file.filename)
+                    try:
+                        with shared_device.openFile(share.name, file_path, 'rb') as f:
+                            content = f.read().decode('utf-8', errors='ignore')
+                            matches = scan_text(content)
+                            if matches:
+                                print(f"PII found in {file_path}: {matches}")
+                                results.append({
+                                    "Serial Number": counter+1,
+                                    "PII Data": ", ".join(matches),
+                                    "Location": os.path.abspath(file)
+                                })
+                                counter += 1
+                    except Exception as e:
+                        print(f"Error scanning {file_path}: {e}")
+    except Exception as e:
+        print(f"Error connecting to {host}: {e}")
+
+def scan_smb_uncred(host, username='guest', password='', domain=''):
+    try:
+        connection = SMBConnection(username, password, 'local_machine', host, domain=domain, use_ntlm_v2=True)
+        connection.connect(host)
+        shares = connection.listShares()
+    except Exception as e:
+        print(f"Error connecting to {host}: {e}")
+        return
+
+    for share in shares:
+        # Only scan shares that are not system shares
+        if share.isSpecial:
+            continue
+
+        try:
+            # Connect to the share
+            shared_device = SMBConnection(host, username, password, host, domain=domain, use_ntlm_v2=True)
+            shared_device.connect(host, share.name)
+
+            # scan files in the share recursively
+            for root, _, files in shared_device.listPath(share.name, "/"):
+                for file in files:
+                    file_path = os.path.join(root, file.filename)
+                    try:
+                        with shared_device.openFile(share.name, file_path, 'rb') as f:
+                            content = f.read().decode('utf-8', errors='ignore')
+                            matches = scan_text(content)
+                            if matches:
+                                print(f"PII found in {file_path}: {matches}")
+                                results.append({
+                                    "Serial Number": counter+1,
+                                    "PII Data": ", ".join(matches),
+                                    "Location": os.path.abspath(file)
+                                })
+                                counter += 1
+                    except Exception as e:
+                        print(f"Error scanning {file_path}: {e}")
+        except Exception as e:
+            print(f"Error connecting to share {share.name}: {e}")
 
 def scan_ftp(host, username, password):
-    ftp = ftplib.FTP(host)
-    ftp.login(username, password)
-    ftp.cwd('/')
-    files = ftp.nlst()
-    for file in files:
-        with ftp.open(file, 'r') as f:
-            content = f.read()
-            matches = scan_text(content)
-            if matches:
-                print(f"PII found in {file}: {matches}")
-                results.append({
-                    "Serial Number": counter+1,
-                    "PII Data": ", ".join(matches),
-                    "File Path": os.path.abspath(file)
-                })
-                counter += 1
-    ftp.quit()
-
-def scan_db(host, username, password, db_name):
-    connection = pymysql.connect(host=host, user=username, password=password, db=db_name, cursorclass=pymysql.cursors.DictCursor)
-    cursor = connection.cursor()
-
-    # Get list of tables in the database
-    cursor.execute("SHOW TABLES")
-    tables = [table['Tables_in_' + db_name] for table in cursor.fetchall()]
-
-    # Loop through each table
-    for table in tables:
-        # Get list of columns in the table
-        cursor.execute(f"DESCRIBE {table}")
-        columns = [column['Field'] for column in cursor.fetchall()]
-
-        # Loop through each column and scan for PII
-        for column in columns:
-            # Construct SELECT statement for the column
-            select_query = f"SELECT {column} FROM {table}"
-            cursor.execute(select_query)
-
-            # Loop through each row in the column and scan for PII
-            for row in cursor.fetchall():
-                if row[column] is not None:
-                    matches = scan_text(row[column])
+    try:
+        ftp = ftplib.FTP(host)
+        ftp.login(username, password)
+        ftp.cwd('/')
+        files = ftp.nlst()
+        for file in files:
+            try:
+                with ftp.open(file, 'r') as f:
+                    content = f.read()
+                    matches = scan_text(content)
                     if matches:
-                        print(f"PII found in {db_name}.{table}.{column}: {matches}")
+                        print(f"PII found in {file}: {matches}")
                         results.append({
                             "Serial Number": counter+1,
                             "PII Data": ", ".join(matches),
-                            "File Path": os.path.abspath(file)
+                            "Location": os.path.abspath(file)
                         })
                         counter += 1
+            except Exception as e:
+                print(f"Error scanning {file}: {e}")
+        ftp.quit()
+    except Exception as e:
+        print(f"Error connecting to FTP server: {e}")
 
-    connection.close()
+
+def scan_ftp_uncred(host):
+    try:
+        ftp = ftplib.FTP(host)
+        ftp.login()
+        ftp.cwd('/')
+        files = ftp.nlst()
+        counter = 0
+        results = []
+        for file in files:
+            try:
+                with ftp.open(file, 'r') as f:
+                    content = f.read()
+                    matches = scan_text(content)
+                    if matches:
+                        print(f"PII found in {file}: {matches}")
+                        results.append({
+                            "Serial Number": counter+1,
+                            "PII Data": ", ".join(matches),
+                            "Location": os.path.abspath(file)
+                        })
+                        counter += 1
+            except Exception as e:
+                print(f"Error scanning {file}: {e}")
+        ftp.quit()
+        return results
+    except Exception as e:
+        print(f"Error connecting to {host}: {e}")
+        return []
+
+#Scan Database Credentialed
+
+def scan_db(db_type, host, username, password, db_name):
+    try:
+        if db_type == 'mysql':
+            connection = pymysql.connect(host=host, user=username, password=password, db=db_name, cursorclass=pymysql.cursors.DictCursor)
+            cursor = connection.cursor()
+        elif db_type == 'mssql':
+            connection = pymssql.connect(server=host, user=username, password=password, database=db_name)
+            cursor = connection.cursor(as_dict=True)
+        elif db_type == 'postgresql':
+            connection = psycopg2.connect(host=host, user=username, password=password, database=db_name)
+            cursor = connection.cursor()
+        elif db_type == 'oracledb':
+            dsn = cx_Oracle.makedsn(host, 1521, service_name=db_name)
+            connection = cx_Oracle.connect(user=username, password=password, dsn=dsn)
+            cursor = connection.cursor()
+
+        # Get list of tables in the database
+        if db_type == 'mssql':
+            cursor.execute("SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE='BASE TABLE'")
+        else:
+            cursor.execute("SHOW TABLES")
+        tables = [table[0] for table in cursor.fetchall()]
+
+        # Loop through each table
+        for table in tables:
+            # Get list of columns in the table
+            if db_type == 'mssql':
+                cursor.execute(f"SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_NAME = '{table}'")
+            else:
+                cursor.execute(f"DESCRIBE {table}")
+            columns = [column['Field'] if db_type == 'mysql' or db_type == 'postgresql' or db_type == 'oracledb' else column['COLUMN_NAME'] for column in cursor.fetchall()]
+
+            # Loop through each column and scan for PII
+            for column in columns:
+                # Construct SELECT statement for the column
+                select_query = f"SELECT {column} FROM {table}"
+                cursor.execute(select_query)
+
+                # Loop through each row in the column and scan for PII
+                for row in cursor.fetchall():
+                    if row[column] is not None:
+                        matches = scan_text(row[column])
+                        if matches:
+                            print(f"PII found in {db_name} in {table}: {matches}")
+                            results.append({
+                                "Serial Number": counter+1,
+                                "PII Data": ", ".join(matches),
+                                "Location": f"{table}.{column} in {db_name}"
+                            })
+                            counter += 1
+
+        connection.close()
+
+    except Exception as e:
+        print(f"Error scanning database {db_name}: {e}")
+        results = []
+
+    return results
+
+# Scan Database UnCredentialed
+
+def scan_db_uncred(db_type, host, db_name):
+    try:
+        # Set the driver based on the database type
+        if db_type == 'mysql':
+            driver = 'MySQL ODBC 8.0 ANSI Driver'
+            dsn = f"Driver={{{driver}}};Server={host};Database={db_name};Trusted_Connection=yes;"
+        elif db_type == 'mssql':
+            driver = 'SQL Server'
+            dsn = f"Driver={{{driver}}};Server={host};Database={db_name};Trusted_Connection=yes;"
+        elif db_type == 'postgresql':
+            driver = 'PostgreSQL ANSI'
+            dsn = f"Driver={{{driver}}};Server={host};Database={db_name};Trusted_Connection=yes;"
+        elif db_type == 'oracledb':
+            driver = 'Oracle in instantclient_19_11'
+            dsn = f"Driver={{{driver}}};DBQ={host};Uid=/;Pwd=/;"
+        else:
+            raise ValueError(f"Invalid db_type: {db_type}")
+
+        connection = pyodbc.connect(dsn)
+        cursor = connection.cursor()
+
+        # Get list of tables in the database
+        cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema')")
+        tables = [table[0] for table in cursor.fetchall()]
+
+        # Loop through each table
+        for table in tables:
+            # Get list of columns in the table
+            cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'")
+            columns = [column[0] for column in cursor.fetchall()]
+
+            # Loop through each column and scan for PII
+            for column in columns:
+                # Construct SELECT statement for the column
+                select_query = f"SELECT {column} FROM {table}"
+                cursor.execute(select_query)
+
+                # Loop through each row in the column and scan for PII
+                for row in cursor.fetchall():
+                    if row[column] is not None:
+                        matches = scan_text(row[column])
+                        if matches:
+                            print(f"PII found in {db_name} in {table}.{column}: {matches}")
+                            results.append({
+                                "Serial Number": counter+1,
+                                "PII Data": ", ".join(matches),
+                                "Location": f"{table}.{column} in {db_name}"
+                            })
+                            counter += 1
+
+        connection.close()
+
+    except pyodbc.Error as e:
+        print(f"Error connecting to database: {e}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    return results
 
 # Main function
+import getpass
+import csv
+
 def main():
     print("Please choose the scanning type:")
     print("1. Credentialed")
     print("2. Uncredentialed")
-    choice = int(input("Enter the number corresponding to your choice: "))
+    choice = input("Enter the number corresponding to your choice: ")
 
-    if choice == 1:
-        username = input("Enter the username: ")
-        password = getpass.getpass("Enter the password: ")
+    if choice == "1":
+        try:
+            username = input("Enter the username: ")
+            password = getpass.getpass("Enter the password: ")
+            
+            # Scan local file shares
+            filepath1 = input("Enter the path to fileshare: ")
+            scan_files(filepath1)
 
-        # Scan local file shares
-        scan_files('path/to/file/share')
+            # Scan SMB
+            smb_host = input("Enter the SMB host: ")
+            smb_domain = input("Enter the SMB domain: ")
+            smb_user = input("Enter the SMB username: ")
+            smb_password = getpass.getpass("Enter the SMB password: ")
+            scan_smb(smb_host, smb_user, smb_password, smb_domain)
 
-        # Scan SMB
-        smb_host = input("Enter the SMB host: ")
-        smb_domain = input("Enter the SMB domain: ")
-        scan_smb(smb_host, username, password, smb_domain)
+            # Scan FTP
+            ftp_host = input("Enter the FTP host: ")
+            ftp_user = input("Enter the FTP username: ")
+            ftp_password = getpass.getpass("Enter the FTP password: ")
+            scan_ftp(ftp_host, ftp_user, ftp_password)
 
-        # Scan FTP
-        ftp_host = input("Enter the FTP host: ")
-        scan_ftp(ftp_host, username, password)
+            # Scan databases
+            db_type = input("Enter the database type(mysql,mssql,postgresql,oracledb): ")
+            db_host = input("Enter the database host: ")
+            db_port = input("Enter the database port: ")
+            db_name = input("Enter the database name: ")
+            db_user = input("Enter the database username: ")
+            db_password = getpass.getpass("Enter the database password: ")
+            scan_db(db_type, db_host, db_port, db_user, db_password, db_name)
 
-        # Scan databases
-        db_host = input("Enter the database host: ")
-        db_name = input("Enter the database name: ")
-        scan_db(db_host, username, password, db_name)
+            # Save results to CSV file
+            with open('pii_results.csv', 'w', newline='') as csvfile:
+                fieldnames = ['Serial Number', 'PII Data', 'Location']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
 
-        # Save results to CSV file
-        with open("results.csv", "w", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=["Serial Number", "PII Data", "File Path"])
-            writer.writeheader()
-            for result in results:
-                writer.writerow(result)       
+                for result in results:
+                    writer.writerow(result)
 
-        print(f"Found {len(results)} file(s) with PII data. Results saved to 'results.csv'.") 
+            print(f"Found {len(results)} file(s) with PII data. Results saved to 'pii_results.csv'.") 
+        except Exception as e:
+            print(f"An error occurred: {e}")
 
-    elif choice == 2:
-        # Implement uncredentialed scanning logic
-        pass
+    elif choice == "2":
+        try:
+            # Scan local file shares Uncredentialed
+            filepath1 = input("Enter the path to fileshare: ")
+            scan_files(filepath1)
 
-    else:
-        print("Invalid choice. Please select a valid option.")
+            # Scan SMB Uncredentialed
+            smb_host = input("Enter the SMB host: ")
+            scan_smb_uncred(smb_host, "", "", "")
+
+            # Scan FTP Uncredentialed
+            ftp_host = input("Enter the FTP host: ")
+            scan_ftp_uncred(ftp_host)
+
+            # Scan Database Uncredentialed
+            db_type = input("Enter the database type(mysql,mssql,postgresql,oracledb): ")
+            db_host = input("Enter the database host: ")
+            db_port = input("Enter the database port: ")
+            db_name = input("Enter the database name: ")
+            scan_db_uncred(db_type, db_host, db_name)
+
+            # Save results to CSV file
+            with open('pii_results.csv', 'w', newline='') as csvfile:
+                fieldnames = ['Serial Number', 'PII Data', 'Location']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+
+                for result in results:
+                    writer.writerow(result)
+
+            print(f"Found {len(results)} file(s) with PII data. Results saved to 'pii_results.csv'.") 
+        except Exception as e:
+            print(f"An error occurred: {e}")
 
 if __name__ == '__main__':
     main()
