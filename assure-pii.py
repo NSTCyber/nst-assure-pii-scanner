@@ -201,79 +201,90 @@ def scan_ftp_uncred(host):
 
 #Scan Database Credentialed
 
-def scan_db(db_type, host, username, password, db_name):
+def scan_dbs(db_type, host, port, username, password, db_names):
+    results = []
+    counter = 0
+    
     try:
         if db_type == 'mysql':
-            connection = pymysql.connect(host=host, user=username, password=password, db=db_name, cursorclass=pymysql.cursors.DictCursor)
+            connection = pymysql.connect(host=host, user=username, password=password, cursorclass=pymysql.cursors.DictCursor)
             cursor = connection.cursor()
         elif db_type == 'mssql':
-            connection = pymssql.connect(server=host, user=username, password=password, database=db_name)
+            connection = pymssql.connect(server=host, user=username, password=password)
             cursor = connection.cursor(as_dict=True)
         elif db_type == 'postgresql':
-            connection = psycopg2.connect(host=host, user=username, password=password, database=db_name)
+            connection = psycopg2.connect(host=host, user=username, password=password)
             cursor = connection.cursor()
         elif db_type == 'oracledb':
-            dsn = cx_Oracle.makedsn(host, 1521, service_name=db_name)
+            dsn = cx_Oracle.makedsn(host, port, service_name=service_name)
             connection = cx_Oracle.connect(user=username, password=password, dsn=dsn)
             cursor = connection.cursor()
 
-        # Get list of tables in the database
-        if db_type == 'mssql':
-            cursor.execute("SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE='BASE TABLE'")
-        else:
-            cursor.execute("SHOW TABLES")
-        tables = [table[0] for table in cursor.fetchall()]
+        # Loop through each database
+        for db_name in db_names:
+            # Select the database
+            if db_type == 'mysql' or db_type == 'postgresql' or db_type == 'oracledb':
+                cursor.execute(f"USE {db_name}")
+            elif db_type == 'mssql':
+                cursor.execute(f"USE [{db_name}]")
 
-        # Loop through each table
-        for table in tables:
-            # Get list of columns in the table
+            # Get list of tables in the database
             if db_type == 'mssql':
-                cursor.execute(f"SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_NAME = '{table}'")
+                cursor.execute("SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE='BASE TABLE'")
             else:
-                cursor.execute(f"DESCRIBE {table}")
-            columns = [column['Field'] if db_type == 'mysql' or db_type == 'postgresql' or db_type == 'oracledb' else column['COLUMN_NAME'] for column in cursor.fetchall()]
+                cursor.execute("SHOW TABLES")
+            tables = [table[0] for table in cursor.fetchall()]
 
-            # Loop through each column and scan for PII
-            for column in columns:
-                # Construct SELECT statement for the column
-                select_query = f"SELECT {column} FROM {table}"
-                cursor.execute(select_query)
+            # Loop through each table
+            for table in tables:
+                # Get list of columns in the table
+                if db_type == 'mssql':
+                    cursor.execute(f"SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_NAME = '{table}'")
+                else:
+                    cursor.execute(f"DESCRIBE {table}")
+                columns = [column['Field'] if db_type == 'mysql' or db_type == 'postgresql' or db_type == 'oracledb' else column['COLUMN_NAME'] for column in cursor.fetchall()]
 
-                # Loop through each row in the column and scan for PII
-                for row in cursor.fetchall():
-                    if row[column] is not None:
-                        matches = scan_text(row[column])
-                        if matches:
-                            print(f"PII found in {db_name} in {table}: {matches}")
-                            results.append({
-                                "Serial Number": counter+1,
-                                "PII Data": ", ".join(matches),
-                                "Location": f"{table}.{column} in {db_name}"
-                            })
-                            counter += 1
+                # Loop through each column and scan for PII
+                for column in columns:
+                    # Construct SELECT statement for the column
+                    select_query = f"SELECT {column} FROM {table}"
+                    cursor.execute(select_query)
+
+                    # Loop through each row in the column and scan for PII
+                    for row in cursor.fetchall():
+                        if row[column] is not None:
+                            matches = scan_text(row[column])
+                            if matches:
+                                print(f"PII found in {db_name} in {table}: {matches}")
+                                results.append({
+                                    "Serial Number": counter+1,
+                                    "PII Data": ", ".join(matches),
+                                    "Location": f"{table}.{column} in {db_name}"
+                                })
+                                counter += 1
 
         connection.close()
 
     except Exception as e:
-        print(f"Error scanning database {db_name}: {e}")
+        print(f"Error scanning databases: {e}")
         results = []
 
     return results
 
 # Scan Database UnCredentialed
 
-def scan_db_uncred(db_type, host, db_name):
+def scan_db_uncred(db_type, host):
     try:
         # Set the driver based on the database type
         if db_type == 'mysql':
             driver = 'MySQL ODBC 8.0 ANSI Driver'
-            dsn = f"Driver={{{driver}}};Server={host};Database={db_name};Trusted_Connection=yes;"
+            dsn = f"Driver={{{driver}}};Server={host};Trusted_Connection=yes;"
         elif db_type == 'mssql':
             driver = 'SQL Server'
-            dsn = f"Driver={{{driver}}};Server={host};Database={db_name};Trusted_Connection=yes;"
+            dsn = f"Driver={{{driver}}};Server={host};Trusted_Connection=yes;"
         elif db_type == 'postgresql':
             driver = 'PostgreSQL ANSI'
-            dsn = f"Driver={{{driver}}};Server={host};Database={db_name};Trusted_Connection=yes;"
+            dsn = f"Driver={{{driver}}};Server={host};Trusted_Connection=yes;"
         elif db_type == 'oracledb':
             driver = 'Oracle in instantclient_19_11'
             dsn = f"Driver={{{driver}}};DBQ={host};Uid=/;Pwd=/;"
@@ -283,34 +294,52 @@ def scan_db_uncred(db_type, host, db_name):
         connection = pyodbc.connect(dsn)
         cursor = connection.cursor()
 
-        # Get list of tables in the database
-        cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema')")
-        tables = [table[0] for table in cursor.fetchall()]
+        # Get list of databases in the server
+        if db_type == 'mysql':
+            cursor.execute("SHOW DATABASES")
+            databases = [database[0] for database in cursor.fetchall()]
+        elif db_type == 'mssql':
+            cursor.execute("SELECT name FROM master.dbo.sysdatabases")
+            databases = [database[0] for database in cursor.fetchall()]
+        elif db_type == 'postgresql':
+            cursor.execute("SELECT datname FROM pg_database WHERE datistemplate = false")
+            databases = [database[0] for database in cursor.fetchall()]
+        elif db_type == 'oracledb':
+            cursor.execute("SELECT name FROM v$database")
+            databases = [database[0] for database in cursor.fetchall()]
 
-        # Loop through each table
-        for table in tables:
-            # Get list of columns in the table
-            cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'")
-            columns = [column[0] for column in cursor.fetchall()]
+        # Loop through each database
+        results = []
+        counter = 0
+        for database in databases:
+            # Get list of tables in the database
+            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema = '{database}'")
+            tables = [table[0] for table in cursor.fetchall()]
 
-            # Loop through each column and scan for PII
-            for column in columns:
-                # Construct SELECT statement for the column
-                select_query = f"SELECT {column} FROM {table}"
-                cursor.execute(select_query)
+            # Loop through each table
+            for table in tables:
+                # Get list of columns in the table
+                cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}' AND table_schema = '{database}'")
+                columns = [column[0] for column in cursor.fetchall()]
 
-                # Loop through each row in the column and scan for PII
-                for row in cursor.fetchall():
-                    if row[column] is not None:
-                        matches = scan_text(row[column])
-                        if matches:
-                            print(f"PII found in {db_name} in {table}.{column}: {matches}")
-                            results.append({
-                                "Serial Number": counter+1,
-                                "PII Data": ", ".join(matches),
-                                "Location": f"{table}.{column} in {db_name}"
-                            })
-                            counter += 1
+                # Loop through each column and scan for PII
+                for column in columns:
+                    # Construct SELECT statement for the column
+                    select_query = f"SELECT {column} FROM {database}.{table}"
+                    cursor.execute(select_query)
+
+                    # Loop through each row in the column and scan for PII
+                    for row in cursor.fetchall():
+                        if row[column] is not None:
+                            matches = scan_text(row[column])
+                            if matches:
+                                print(f"PII found in {database} in {table}.{column}: {matches}")
+                                results.append({
+                                    "Serial Number": counter+1,
+                                    "PII Data": ", ".join(matches),
+                                    "Location": f"{table}.{column} in {database}"
+                                })
+                                counter += 1
 
         connection.close()
 
@@ -321,6 +350,7 @@ def scan_db_uncred(db_type, host, db_name):
         print(f"An error occurred: {e}")
 
     return results
+
 
 # Main function
 import getpass
