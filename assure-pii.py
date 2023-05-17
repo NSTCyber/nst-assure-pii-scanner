@@ -8,6 +8,7 @@ import pymysql
 import pyodbc
 import psycopg2
 import cx_Oracle
+import pymssql
 from sqlalchemy import create_engine, inspect
 import csv
 import getpass
@@ -25,6 +26,13 @@ pii_patterns = [
     r'[A-Z][a-z]+ [A-Z]\.? [A-Z][a-z]+',  # Full name with middle initial (e.g., John A. Doe)
     r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z]{2,}',  # Email (more general)
     r'\b(?:\d{1,3}\.){3}\d{1,3}\b',  # IPv4 address
+    r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b', # Credit/Debit Card Number
+    r'\b[A-Za-z\s]+\b', # Card Holder Name
+    r'\b(?:0[1-9]|1[0-2])/\d{2}\b', # Expiration Date
+    r'\b\d{3}\b', # Service Code
+    r'\b\d{3,4}\b', # CVV/CVC
+    r'\b\d{4,6}\b', # PIN
+    r'\b\d{12,19}\b', # Account Number
     # Add more PII patterns here
 ]
 
@@ -201,7 +209,7 @@ def scan_ftp_uncred(host):
 
 #Scan Database Credentialed
 
-def scan_dbs(db_type, host, port, username, password, db_names):
+def scan_db(db_type, host, port, username, password):
     results = []
     counter = 0
     
@@ -209,16 +217,24 @@ def scan_dbs(db_type, host, port, username, password, db_names):
         if db_type == 'mysql':
             connection = pymysql.connect(host=host, user=username, password=password, cursorclass=pymysql.cursors.DictCursor)
             cursor = connection.cursor()
+            cursor.execute("SHOW DATABASES")
+            db_names = [db['Database'] for db in cursor.fetchall()]
         elif db_type == 'mssql':
             connection = pymssql.connect(server=host, user=username, password=password)
             cursor = connection.cursor(as_dict=True)
+            cursor.execute("SELECT name FROM sys.databases")
+            db_names = [db[0] for db in cursor.fetchall()]
         elif db_type == 'postgresql':
             connection = psycopg2.connect(host=host, user=username, password=password)
             cursor = connection.cursor()
+            cursor.execute("SELECT datname FROM pg_database")
+            db_names = [db[0] for db in cursor.fetchall()]
         elif db_type == 'oracledb':
             dsn = cx_Oracle.makedsn(host, port, service_name=service_name)
             connection = cx_Oracle.connect(user=username, password=password, dsn=dsn)
             cursor = connection.cursor()
+            cursor.execute("SELECT name FROM v$database")
+            db_names = [db[0] for db in cursor.fetchall()]
 
         # Loop through each database
         for db_name in db_names:
@@ -274,6 +290,8 @@ def scan_dbs(db_type, host, port, username, password, db_names):
 # Scan Database UnCredentialed
 
 def scan_db_uncred(db_type, host):
+    results = []
+    counter = 0
     try:
         # Set the driver based on the database type
         if db_type == 'mysql':
@@ -353,8 +371,6 @@ def scan_db_uncred(db_type, host):
 
 
 # Main function
-import getpass
-import csv
 
 def main():
     print("Please choose the scanning type:")
@@ -388,10 +404,9 @@ def main():
             db_type = input("Enter the database type(mysql,mssql,postgresql,oracledb): ")
             db_host = input("Enter the database host: ")
             db_port = input("Enter the database port: ")
-            db_name = input("Enter the database name: ")
             db_user = input("Enter the database username: ")
             db_password = getpass.getpass("Enter the database password: ")
-            scan_db(db_type, db_host, db_port, db_user, db_password, db_name)
+            scan_db(db_type, db_host, db_port, db_user, db_password)
 
             # Save results to CSV file
             with open('pii_results.csv', 'w', newline='') as csvfile:
@@ -423,9 +438,9 @@ def main():
             # Scan Database Uncredentialed
             db_type = input("Enter the database type(mysql,mssql,postgresql,oracledb): ")
             db_host = input("Enter the database host: ")
-            db_port = input("Enter the database port: ")
-            db_name = input("Enter the database name: ")
-            scan_db_uncred(db_type, db_host, db_name)
+            # db_port = input("Enter the database port: ")
+            # db_name = input("Enter the database name: ")
+            scan_db_uncred(db_type, db_host)
 
             # Save results to CSV file
             with open('pii_results.csv', 'w', newline='') as csvfile:

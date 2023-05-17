@@ -1,0 +1,9 @@
+Serial Number,PII Data,Location
+1,Social Security Number,C:/path/to/file1.txt
+2,Credit Card Number,C:/path/to/file2.txt
+3,Email Address,C:/path/to/file3.txt
+4,Phone Number,C:/path/to/file4.txt
+5,Driver's License Number,\\smbhost\shared_folder\file5.docx
+6,Passport Number,ftp://ftpserver/files/file6.pdf
+7,Bank Account Number,Database:mysql://dbhost:3306/dbname
+8,Email Address,Database:postgresql://dbhost:5432/dbname
